@@ -1,0 +1,81 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "Store the main user parameters including stream key and basic credentials",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "User ID matching the auth UID" },
+        "email": { "type": "string", "description": "Gmail / Google account email" },
+        "name": { "type": "string", "description": "Display name of the user" },
+        "streamKey": { "type": "string", "description": "Secure RTMP push stream key generated" },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Timestamp of creation" }
+      },
+      "required": ["id", "email", "streamKey"]
+    },
+    "Destination": {
+      "title": "Destination",
+      "description": "Outbound RTMP stream endpoints like YouTube, Facebook, Twitch, etc.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "Relay outlet unique ID" },
+        "platform": { "type": "string", "enum": ["youtube", "facebook", "twitch", "custom"], "description": "Social network platform name" },
+        "name": { "type": "string", "description": "Title/alias of the stream relay endpoint" },
+        "rtmpUrl": { "type": "string", "description": "Destination server RTMP ingest URL" },
+        "streamKey": { "type": "string", "description": "Destination server ingestion private stream key" },
+        "enabled": { "type": "boolean", "description": "Whether the relay is armed or disarmed" },
+        "status": { "type": "string", "enum": ["offline", "connecting", "streaming", "error"], "description": "Stream current status" },
+        "errorMessage": { "type": "string", "description": "Optional translation errors detailed description" }
+      },
+      "required": ["id", "platform", "name", "rtmpUrl", "streamKey", "enabled", "status"]
+    },
+    "Video": {
+      "title": "Video",
+      "description": "Video-on-Demand (VOD) assets details saved inside cloud structures",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "Unique video document ID" },
+        "title": { "type": "string", "description": "VOD video custom title" },
+        "videoUrl": { "type": "string", "description": "VOD absolute streaming media file location" },
+        "thumbnailUrl": { "type": "string", "description": "VOD cover visual art image location" },
+        "size": { "type": "string", "description": "Formatted file weight" },
+        "duration": { "type": "string", "description": "Formatted video hours/minutes duration metrics" },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Upload date time" },
+        "status": { "type": "string", "enum": ["ready", "streaming", "processing"], "description": "Virtual replay state" }
+      },
+      "required": ["id", "title", "videoUrl", "thumbnailUrl", "size", "duration", "createdAt", "status"]
+    },
+    "Schedule": {
+      "title": "Schedule",
+      "description": "Scheduled automatic transmission events details",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "Scheduler unique event ID" },
+        "videoId": { "type": "string", "description": "Video reference ID" },
+        "videoTitle": { "type": "string", "description": "Target video title snapshotted" },
+        "scheduledTime": { "type": "string", "description": "Predefined broadcast time representation" },
+        "targetDestinations": { "type": "array", "description": "Destination IDs target array list" },
+        "status": { "type": "string", "enum": ["scheduled", "running", "completed", "cancelled"], "description": "Scheduler status state" }
+      },
+      "required": ["id", "videoId", "videoTitle", "scheduledTime", "targetDestinations", "status"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "User",
+      "description": "Root user documentation node"
+    },
+    "/users/{userId}/destinations/{destId}": {
+      "schema": "Destination",
+      "description": "User specific outbound stream relay nodes collection"
+    },
+    "/users/{userId}/videos/{videoId}": {
+      "schema": "Video",
+      "description": "User custom video management uploads library"
+    },
+    "/users/{userId}/schedules/{scheduleId}": {
+      "schema": "Schedule",
+      "description": "Multicasting scheduler events listings"
+    }
+  }
+}

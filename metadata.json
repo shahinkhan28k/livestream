@@ -1,0 +1,6 @@
+{
+  "name": "Live Streaming & Relay Architecture Designer",
+  "description": "An interactive, high-fidelity developer dashboard, architecture visualizer, NGINX RTMP/FFmpeg configuration generator, and API sandbox for building multi-platform live streaming platforms (like Restream.io).",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
