@@ -60,6 +60,25 @@ import { onAuthStateChanged, signOut } from 'firebase/auth';
 import { collection, doc, onSnapshot, setDoc, updateDoc, deleteDoc, getDoc } from 'firebase/firestore';
 import { auth, db, OperationType, handleFirestoreError } from './firebaseConfig';
 
+// Helper to resolve Backend API endpoints for seamless decoupled Vercel + Render orchestration
+export const getApiUrl = (endpoint: string): string => {
+  // Read VITE_BACKEND_URL or localStorage configurator, with default fallback to current domain
+  const configuredBackend = (((import.meta as any).env?.VITE_BACKEND_URL) || localStorage.getItem('STREAM_SYNC_BACKEND_URL') || '').trim();
+  const cleanBase = configuredBackend.endsWith('/') ? configuredBackend.slice(0, -1) : configuredBackend;
+  const cleanEndpoint = endpoint.startsWith('/') ? endpoint : `/${endpoint}`;
+  return `${cleanBase}${cleanEndpoint}`;
+};
+
+// Helper to resolve physical media resources (uploads) hosted on Decoupled Render backend
+export const resolveMediaUrl = (url: string): string => {
+  if (!url) return '';
+  if (url.startsWith('/uploads/') || url.startsWith('uploads/')) {
+    const relativePart = url.startsWith('/') ? url : `/${url}`;
+    return getApiUrl(relativePart);
+  }
+  return url;
+};
+
 export default function App() {
   // Navigation State
   const [activePage, setActivePage] = useState<'home' | 'login' | 'signup' | 'dashboard' | 'upload' | 'stream-control' | 'analytics' | 'admin'>('home');
@@ -377,13 +396,13 @@ echo "Stream completed or stopped by operator."
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
       if (firebaseUser) {
+        let displayName = firebaseUser.displayName || firebaseUser.email?.split('@')[0] || 'User';
+        let streamKey = `live_${Math.floor(100000 + Math.random() * 900000)}`;
+
         try {
           const userDocRef = doc(db, 'users', firebaseUser.uid);
           const userDocSnap = await getDoc(userDocRef);
           
-          let displayName = firebaseUser.displayName || firebaseUser.email?.split('@')[0] || 'User';
-          let streamKey = `live_${Math.floor(100000 + Math.random() * 900000)}`;
-
           if (userDocSnap.exists()) {
             const data = userDocSnap.data();
             displayName = data.name || displayName;
@@ -397,21 +416,39 @@ echo "Stream completed or stopped by operator."
               streamKey: streamKey,
               createdAt: new Date().toISOString()
             };
-            await setDoc(userDocRef, newProfile);
+            try {
+              await setDoc(userDocRef, newProfile);
+            } catch (writeErr) {
+              console.warn("Failed to write offline user profile doc (can be normal in offline mode):", writeErr);
+            }
           }
-
-          const matchedUser: AppUser = {
-            id: firebaseUser.uid,
-            email: firebaseUser.email || '',
-            name: displayName,
-            streamKey: streamKey
-          };
-
-          setCurrentUser(matchedUser);
-          localStorage.setItem('currentUser', JSON.stringify(matchedUser));
         } catch (error) {
-          console.error("Error setting custom user on Auth state change:", error);
+          console.warn("Firestore user document fetch failed (client is likely offline). Restoring session from cache...", error);
+          
+          // Attempt to retrieve cached user configuration to preserve custom layouts & streamKeys
+          const cached = localStorage.getItem('currentUser');
+          if (cached) {
+            try {
+              const parsed = JSON.parse(cached);
+              if (parsed && parsed.id === firebaseUser.uid) {
+                if (parsed.name) displayName = parsed.name;
+                if (parsed.streamKey) streamKey = parsed.streamKey;
+              }
+            } catch (parseErr) {
+              console.error("Cache decode error:", parseErr);
+            }
+          }
         }
+
+        const matchedUser: AppUser = {
+          id: firebaseUser.uid,
+          email: firebaseUser.email || '',
+          name: displayName,
+          streamKey: streamKey
+        };
+
+        setCurrentUser(matchedUser);
+        localStorage.setItem('currentUser', JSON.stringify(matchedUser));
       } else {
         setCurrentUser(null);
         localStorage.removeItem('currentUser');
@@ -483,7 +520,7 @@ echo "Stream completed or stopped by operator."
     const fetchTelem = async () => {
       let nextStats: SystemStats;
       try {
-        const res = await fetch('/api/system/stats');
+        const res = await fetch(getApiUrl('/api/system/stats'));
         if (res.ok) {
           nextStats = await res.json();
           // Reset statistics weights if nothing is streaming
@@ -807,15 +844,15 @@ echo "Stream completed or stopped by operator."
     reader.readAsDataURL(file);
   };
 
-  // 8. Video upload emulation loop
-  const handleMockUpload = (e: React.FormEvent) => {
+  // 8. Video upload real file controller
+  const handleMockUpload = async (e: React.FormEvent) => {
     e.preventDefault();
     if (uploadProgress !== null) {
       addLog('CLIENT', 'warn', 'ভিডিও আপলোড ইতিমধ্যে প্রক্রিয়াধীন রয়েছে। ডাবল সেভ প্রতিরোধ করা হলো (Duplicate save prevented).');
       return;
     }
     if (!videoTitleInput) return;
-    setUploadProgress(0);
+    setUploadProgress(1);
     setUploadError(null);
 
     const thumbnails = {
@@ -825,71 +862,145 @@ echo "Stream completed or stopped by operator."
     };
 
     const thumbUrl = customThumbnailUrl.trim() || (thumbnails as any)[selectedThumbnailPreset] || thumbnails.cyberpunk;
-    const finalVideoUrl = videoBlobUrl || 'https://storage.googleapis.com/h5-upload/dummy_temp.mp4';
+    let finalVideoUrl = 'https://storage.googleapis.com/stream-sync-assets/cyperpunk_esports.mp4';
 
-    const interval = setInterval(async () => {
-      setUploadProgress(p => {
-        if (p === null) return 0;
-        if (p >= 100) {
-          clearInterval(interval);
-          setTimeout(async () => {
-            if (currentUser) {
-              const path = `users/${currentUser.id}/videos`;
+    // If an actual local video file was drop/selected, upload it to Express uploads path
+    if (uploadedVideoFile) {
+      try {
+        addLog('CLIENT', 'info', `সার্ভারে বাস্তব ভিডিও আপলোড শুরু হচ্ছে... ফাইল: ${uploadedVideoFile.name} (${videoSizeInput})`);
+        
+        const formData = new FormData();
+        formData.append('video', uploadedVideoFile);
+
+        const xhr = new XMLHttpRequest();
+        
+        const uploadPromise = new Promise<{ videoUrl: string, size: string, video: any }>((resolve, reject) => {
+          xhr.upload.onprogress = (event) => {
+            if (event.lengthComputable) {
+              const pct = Math.round((event.loaded / event.total) * 98); // save 2% for final server write callback
+              setUploadProgress(Math.max(1, pct));
+            }
+          };
+
+          xhr.onload = () => {
+            if (xhr.status >= 200 && xhr.status < 300) {
               try {
-                const docId = `vid_${Math.random().toString(36).substr(2, 9)}`;
-                await setDoc(doc(db, 'users', currentUser.id, 'videos', docId), {
-                  id: docId,
-                  title: videoTitleInput,
-                  description: videoDescriptionInput,
-                  videoUrl: finalVideoUrl,
-                  thumbnailUrl: thumbUrl,
-                  size: videoSizeInput || '48.5 MB',
-                  duration: videoDurationInput || '05:10',
-                  createdAt: new Date().toISOString(),
-                  status: 'ready'
-                });
-                addLog('FIREBASE-STORE', 'success', `VOD Metadata saved: synced on Cloud Firestore path '${path}'.`);
+                const res = JSON.parse(xhr.responseText);
+                resolve(res);
               } catch (err) {
-                handleFirestoreError(err, OperationType.CREATE, path);
+                reject(new Error('Invalid JSON upload feedback from server.'));
               }
             } else {
-              setVideos(prev => [...prev, {
-                id: `vid_${Math.random().toString(36).substr(2, 9)}`,
-                title: videoTitleInput,
-                description: videoDescriptionInput,
-                videoUrl: finalVideoUrl,
-                thumbnailUrl: thumbUrl,
-                size: videoSizeInput || '48.5 MB',
-                duration: videoDurationInput || '05:10',
-                createdAt: new Date().toISOString(),
-                status: 'ready'
-              }]);
-              addLog('CLIENT', 'success', 'VOD mock upload saved to local in-memory session.');
+              reject(new Error(`Upload failed on server with status code ${xhr.status}`));
             }
-            setUploadProgress(null);
-            setVideoTitleInput('');
-            setVideoDescriptionInput('');
-            setCustomThumbnailUrl('');
-            setUploadedVideoFile(null);
-            setVideoBlobUrl('');
-          }, 400);
-          return 100;
-        }
-        return p + 25;
+          };
+
+          xhr.onerror = () => reject(new Error('Network error during physical VOD video file upload.'));
+          
+          const uploadTargetUrl = currentUser 
+            ? getApiUrl(`/api/upload?userId=${currentUser.id}`) 
+            : getApiUrl('/api/upload');
+          xhr.open('POST', uploadTargetUrl);
+          xhr.send(formData);
+        });
+
+        const uploadResult = await uploadPromise;
+        finalVideoUrl = uploadResult.videoUrl;
+        setUploadProgress(100);
+        addLog('CLIENT', 'success', `ভিডিও ফাইল সফলভাবে সার্ভার ডিস্কে আপলোড ও সংরক্ষিত হয়েছে: ${finalVideoUrl}`);
+      } catch (err: any) {
+        setUploadProgress(null);
+        setUploadError(err.message || 'File upload failed');
+        addLog('CLIENT', 'error', `ফাইল আপলোড ব্যর্থ হয়েছে: ${err.message || err}`);
+        alert(`সার্ভারে ফাইল আপলোড করতে সমস্যা হয়েছে: ${err.message || err}`);
+        return;
+      }
+    } else {
+      // Demo fallback mode (No local file selected, mock loop)
+      addLog('CLIENT', 'info', 'কোনো বাস্তব ভিডিও ফাইল সংযুক্ত করা হয়নি, লাইব্রেরি ডেডিকেটেড ডেমো VOD সোর্স যুক্ত করা হচ্ছে...');
+      let simulatedPct = 0;
+      const progressPromise = new Promise<void>((resolve) => {
+        const intv = setInterval(() => {
+          simulatedPct += 20;
+          setUploadProgress(simulatedPct);
+          if (simulatedPct >= 100) {
+            clearInterval(intv);
+            resolve();
+          }
+        }, 200);
       });
-    }, 250);
+      await progressPromise;
+      finalVideoUrl = videoBlobUrl || 'https://storage.googleapis.com/stream-sync-assets/cyperpunk_esports.mp4';
+    }
+
+    const docId = `vid_${Math.random().toString(36).substr(2, 9)}`;
+    const newVideoObject = {
+      id: docId,
+      title: videoTitleInput,
+      description: videoDescriptionInput,
+      videoUrl: finalVideoUrl,
+      thumbnailUrl: thumbUrl,
+      size: videoSizeInput || '48.5 MB',
+      duration: videoDurationInput || '05:10',
+      createdAt: new Date().toISOString(),
+      status: 'ready' as const
+    };
+
+    if (currentUser) {
+      const path = `users/${currentUser.id}/videos`;
+      try {
+        await setDoc(doc(db, 'users', currentUser.id, 'videos', docId), newVideoObject);
+        addLog('FIREBASE-STORE', 'success', `VOD Metadata saved: synced on Cloud Firestore path '${path}'.`);
+      } catch (err) {
+        handleFirestoreError(err, OperationType.CREATE, path);
+      }
+    } else {
+      setVideos(prev => [...prev, newVideoObject]);
+      addLog('CLIENT', 'success', 'VOD upload saved to local in-memory session.');
+    }
+
+    // Reset clean states
+    setUploadProgress(null);
+    setVideoTitleInput('');
+    setVideoDescriptionInput('');
+    setCustomThumbnailUrl('');
+    setUploadedVideoFile(null);
+    setVideoBlobUrl('');
   };
 
   const handleDeleteVideo = async (id: string, name: string) => {
+    const targetVideo = videos.find(v => v.id === id);
     if (currentUser) {
       const path = `users/${currentUser.id}/videos/${id}`;
       try {
+        // Stop any running streams associated with this video before deleting
+        if (targetVideo && targetVideo.status === 'streaming') {
+          await handleStopVideoStream(id);
+        }
+
+        // Delete from Firestore
         await deleteDoc(doc(db, 'users', currentUser.id, 'videos', id));
         addLog('FIREBASE-STORE', 'warn', `Deleted VOD document from Firestore: ${name}`);
+
+        // Delete physical file if uploaded on server
+        if (targetVideo && targetVideo.videoUrl.startsWith('/uploads/')) {
+          const res = await fetch(getApiUrl('/api/videos/delete-file'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ videoUrl: targetVideo.videoUrl, userId: currentUser.id })
+          });
+          const resData = await res.json();
+          if (resData.success) {
+            addLog('CLIENT', 'success', `সার্ভার ডিস্ক থেকে বাস্তব ফাইলটি মুছে ফেলা হয়েছে: ${name}`);
+          }
+        }
       } catch (err) {
         handleFirestoreError(err, OperationType.DELETE, path);
       }
     } else {
+      if (targetVideo && targetVideo.status === 'streaming') {
+        await handleStopVideoStream(id);
+      }
       setVideos(prev => prev.filter(v => v.id !== id));
       addLog('CLIENT', 'warn', `Deleted VOD local asset: ${name}`);
     }
@@ -989,38 +1100,118 @@ echo "Stream completed or stopped by operator."
 
   // VOD Video Stream Control triggers
   const handleStreamVideoNow = async (videoId: string) => {
+    const targetVideo = videos.find(v => v.id === videoId);
+    if (!targetVideo) {
+      addLog('CLIENT', 'error', 'ভিডিও ফাইলটি খুঁজে পাওয়া যায়নি (Video asset not found).');
+      return;
+    }
+
+    // Capture all active running/relays
+    const activeDests = destinations.filter(d => d.enabled);
+    if (activeDests.length === 0) {
+      addLog('CLIENT', 'warn', 'কোনো সক্রিয় ব্রডকাস্ট প্ল্যাটফর্ম সিলেক্ট করা নেই! প্রথমে রিলে সেটআপ করুন।');
+      alert('সরাসরি সম্প্রচার শুরু করার জন্য অনুগ্রহ করে কম পক্ষে একটি প্ল্যাটফর্ম (যেমনঃ YouTube বা Facebook) সক্রিয় বা অন করুন।');
+      return;
+    }
+
+    addLog('CLIENT', 'info', `সার্ভার-সাই端 সম্প্রচার প্রসেস শুরু হচ্ছে...`);
+
     if (currentUser) {
       const path = `users/${currentUser.id}/videos/${videoId}`;
       try {
+        // 1. Update Firestore state
         await updateDoc(doc(db, 'users', currentUser.id, 'videos', videoId), {
           status: 'streaming'
         });
-        addLog('FFMPEG', 'success', 'VOD broadcast initiated. Firestore status updated to streaming.');
+
+        // 2. Optimistic local state update
+        setVideos(prev => prev.map(v => v.id === videoId ? { ...v, status: 'streaming' } : v));
+        addLog('FFMPEG', 'success', 'VOD broadcast updated in cloud. Initializing server engine relays...');
+
+        // 3. Command Express of start-video
+        const res = await fetch(getApiUrl('/api/streams/start-video'), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            videoId,
+            videoUrl: targetVideo.videoUrl,
+            title: targetVideo.title,
+            destinations: activeDests,
+            userId: currentUser.id
+          })
+        });
+
+        const data = await res.json();
+        if (data.success) {
+          addLog('FFMPEG', 'success', `লাইভ স্ট্রিমিং সম্পন্ন হয়েছে! ব্যাকগ্রাউন্ড FFmpeg কমান্ড সফলভাবে চালু হয়েছে।`);
+        } else {
+          addLog('FFMPEG', 'error', `FFmpeg ত্রুটি: ${data.error || 'Unknown error'}`);
+          alert(`সম্প্রচার শুরু করা যায়নি: ${data.error || 'Server FFmpeg configuration issue.'}`);
+        }
       } catch (err) {
         handleFirestoreError(err, OperationType.UPDATE, path);
       }
     } else {
+      // Offline/Local Demo mode
       setVideos(prev => prev.map(v => v.id === videoId ? { ...v, status: 'streaming' } : v));
       addLog('CLIENT', 'success', 'VOD broadcast initiated locally.');
+
+      try {
+        const res = await fetch(getApiUrl('/api/streams/start-video'), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            videoId,
+            videoUrl: targetVideo.videoUrl,
+            title: targetVideo.title,
+            destinations: activeDests,
+            userId: 'guest'
+          })
+        });
+        const data = await res.json();
+        if (data.success) {
+          addLog('FFMPEG', 'success', `ব্যাকগ্রাউন্ড সম্প্রচার চালু হয়েছে!`);
+        } else {
+          addLog('FFMPEG', 'error', `ত্রুটি: ${data.error}`);
+        }
+      } catch (e) {
+        console.error("error starting stream", e);
+      }
     }
   };
 
-  const handleStopVideoStream = async () => {
+  const handleStopVideoStream = async (videoId?: string) => {
+    try {
+      addLog('CLIENT', 'info', 'সম্পূর্ণ লাইভ সম্প্রচার বন্ধের অনুরোধ পাঠানো হয়েছে...');
+      const res = await fetch(getApiUrl('/api/streams/stop'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ videoId, userId: currentUser?.id || 'guest' })
+      });
+      const data = await res.json();
+      if (data.success) {
+        addLog('FFMPEG', 'warn', `সার্ভার ব্যাকগ্রাউন্ড FFmpeg ক্লোজ হয়েছে। বন্ধ হওয়া লাইভ ব্রডকাস্ট রিলে সংখ্যাঃ ${data.killedCount || 0}`);
+      }
+    } catch (err) {
+      console.error(err);
+    }
+
     if (currentUser) {
       try {
-        const activeStreaming = videos.filter(v => v.status === 'streaming');
-        for (const v of activeStreaming) {
+        const targetVideos = videoId ? videos.filter(v => v.id === videoId) : videos.filter(v => v.status === 'streaming');
+        for (const v of targetVideos) {
           const path = `users/${currentUser.id}/videos/${v.id}`;
           await updateDoc(doc(db, 'users', currentUser.id, 'videos', v.id), {
             status: 'ready'
           });
         }
-        addLog('FFMPEG', 'warn', 'VOD playback halted in Firestore.');
+        setVideos(prev => prev.map(v => (videoId ? (v.id === videoId ? { ...v, status: 'ready' } : v) : { ...v, status: 'ready' })));
+        addLog('FFMPEG', 'warn', 'ভিডিও সম্প্রচার ফায়ারস্টোর ক্লাউডে স্থগিত করা হয়েছে।');
       } catch (err) {
         console.error("error stopping stream", err);
       }
     } else {
-      setVideos(prev => prev.map(v => ({ ...v, status: 'ready' })));
+      setVideos(prev => prev.map(v => (videoId ? (v.id === videoId ? { ...v, status: 'ready' } : v) : { ...v, status: 'ready' })));
       addLog('CLIENT', 'warn', 'VOD playback interrupted locally.');
     }
   };
@@ -1149,7 +1340,7 @@ echo "Stream completed or stopped by operator."
       </header>
 
       {/* Primary Canvas Container: Layout splits depending on public or private page contexts */}
-      <div className="flex-1 flex max-w-7xl w-full mx-auto p-4 md:p-6 gap-6 relative">
+      <div className={`flex-1 flex max-w-7xl w-full mx-auto p-4 md:p-6 gap-6 relative ${currentUser && ['dashboard', 'upload', 'stream-control', 'analytics', 'admin'].includes(activePage) ? 'pb-24 lg:pb-6' : ''}`}>
         
         {/* Advisories for protected page redirection */}
         {protectedRedirectMessage && (
@@ -1215,24 +1406,38 @@ echo "Stream completed or stopped by operator."
           
           {/* Mobile Navigator tabs (Active only on small screens for logged users) */}
           {currentUser && ['dashboard', 'upload', 'stream-control', 'analytics', 'admin'].includes(activePage) && (
-            <div className="grid grid-cols-5 gap-1.5 p-1 bg-slate-900 border border-slate-800 rounded-xl mb-4 lg:hidden">
+            <div className="fixed bottom-0 left-0 right-0 z-40 bg-slate-950/95 backdrop-blur-md border-t border-slate-800 py-3 px-2 shadow-[0_-10px_25px_rgba(0,0,0,0.5)] flex justify-around items-center lg:hidden">
               {[
-                { id: 'dashboard', icon: LayoutDashboard },
-                { id: 'upload', icon: UploadCloud },
-                { id: 'stream-control', icon: Tv },
-                { id: 'analytics', icon: BarChart3 },
-                { id: 'admin', icon: Server }
-              ].map(link => (
-                <button
-                  key={link.id}
-                  onClick={() => setActivePage(link.id as any)}
-                  className={`py-2 flex items-center justify-center rounded-lg text-xs transition ${
-                    activePage === link.id ? 'bg-amber-500/10 text-amber-400 border border-amber-500/20' : 'text-slate-400 hover:text-white'
-                  }`}
-                >
-                  <link.icon className="w-4 h-4" />
-                </button>
-              ))}
+                { id: 'dashboard', label: 'ড্যাশবোর্ড', icon: LayoutDashboard },
+                { id: 'upload', label: 'ভিডিও', icon: UploadCloud },
+                { id: 'stream-control', label: 'সম্প্রচার', icon: Tv },
+                { id: 'analytics', label: 'রাডার', icon: BarChart3 },
+                { id: 'admin', label: 'ডিবাগ', icon: Server }
+              ].map(link => {
+                const Icon = link.icon;
+                const isSelected = activePage === link.id;
+                return (
+                  <button
+                    key={link.id}
+                    onClick={() => {
+                      setProtectedRedirectMessage(null);
+                      setActivePage(link.id as any);
+                    }}
+                    className={`flex flex-col items-center justify-center gap-1.5 px-2.5 py-1 min-h-[44px] transition-all flex-1 ${
+                      isSelected 
+                        ? 'text-amber-500 scale-105 font-bold' 
+                        : 'text-slate-400 hover:text-white'
+                    }`}
+                  >
+                    <div className={`p-1.5 rounded-xl transition-all ${
+                      isSelected ? 'bg-amber-500/10 scale-110 shadow-lg border border-amber-500/20' : ''
+                    }`}>
+                      <Icon className="w-4.5 h-4.5" />
+                    </div>
+                    <span className="text-[10px] tracking-tight font-medium">{link.label}</span>
+                  </button>
+                );
+              })}
             </div>
           )}
 
@@ -1849,7 +2054,7 @@ echo "Stream completed or stopped by operator."
                         <div key={vod.id} className="bg-slate-950/60 rounded-xl border border-slate-850 p-4 flex flex-col md:flex-row md:items-center justify-between gap-4">
                           <div className="flex items-start gap-4">
                             <img 
-                              src={vod.thumbnailUrl} 
+                              src={resolveMediaUrl(vod.thumbnailUrl)} 
                               alt="Thumbnail cover" 
                               className="w-20 h-14 object-cover rounded-lg border border-slate-800 shrink-0 shadow-md"
                               referrerPolicy="no-referrer"
@@ -2383,7 +2588,7 @@ echo "Stream completed or stopped by operator."
                               if (activeWizardVideo && activeWizardVideo.videoUrl && (activeWizardVideo.videoUrl.startsWith('blob:') || activeWizardVideo.videoUrl.length > 30)) {
                                 return (
                                   <video 
-                                    src={activeWizardVideo.videoUrl} 
+                                    src={resolveMediaUrl(activeWizardVideo.videoUrl)} 
                                     autoPlay 
                                     loop 
                                     muted 

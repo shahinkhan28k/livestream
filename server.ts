@@ -6,6 +6,10 @@
 import express from 'express';
 import path from 'path';
 import { createServer as createViteServer } from 'vite';
+import multer from 'multer';
+import fs from 'fs';
+import { spawn, ChildProcess } from 'child_process';
+import cors from 'cors';
 
 // In-Memory Database for demonstration and sandbox interactivity
 interface User {
@@ -111,6 +115,50 @@ async function startServer() {
   const PORT = 3000;
 
   app.use(express.json());
+  app.use(cors({
+    origin: true,
+    credentials: true,
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization']
+  }));
+
+  // Setup static uploads directory
+  const uploadsDir = path.join(process.cwd(), 'uploads');
+  if (!fs.existsSync(uploadsDir)) {
+    fs.mkdirSync(uploadsDir, { recursive: true });
+  }
+  app.use('/uploads', express.static(uploadsDir));
+
+  // Configure multer disk storage for video uploads
+  const storage = multer.diskStorage({
+    destination: (req, file, cb) => {
+      const uploadPath = path.join(process.cwd(), 'uploads');
+      if (!fs.existsSync(uploadPath)) {
+        fs.mkdirSync(uploadPath, { recursive: true });
+      }
+      cb(null, uploadPath);
+    },
+    filename: (req, file, cb) => {
+      const userId = (req.query.userId || req.body.userId || 'guest') as string;
+      const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1e9);
+      const ext = path.extname(file.originalname) || '.mp4';
+      cb(null, `${userId}-${uniqueSuffix}${ext}`);
+    }
+  });
+
+  const upload = multer({
+    storage,
+    limits: { fileSize: 10 * 1024 * 1024 * 1024 } // 10GB limit to handle large VODs
+  });
+
+  // Track active streaming background child processes
+  // Maps videoId -> { processes: Map<destinationId, ChildProcess>, startedAt: string, title: string }
+  const activeStreams = new Map<string, {
+    processes: Map<string, ChildProcess>;
+    videoId: string;
+    startedAt: string;
+    title: string;
+  }>();
 
   // API Log middleware for demonstration
   app.use('/api', (req, res, next) => {
@@ -246,6 +294,69 @@ async function startServer() {
     res.json({ success: true, message: 'Video asset deleted' });
   });
 
+  // REST API: Delete uploaded physical video file
+  app.post('/api/videos/delete-file', (req, res) => {
+    const { videoUrl, userId } = req.body;
+    if (!videoUrl || !userId) {
+      return res.status(400).json({ error: 'Missing videoUrl or userId' });
+    }
+
+    if (!videoUrl.startsWith('/uploads/')) {
+      return res.json({ success: true, message: 'External URL, skipping server disk deletion' });
+    }
+
+    const filename = videoUrl.replace('/uploads/', '');
+    // Secure validation: check file prefix match to authenticated user identity
+    if (!filename.startsWith(`${userId}-`)) {
+      return res.status(403).json({ error: 'Unauthorized: You are not permitted to delete other users physical files.' });
+    }
+
+    const filePath = path.join(process.cwd(), 'uploads', filename);
+    if (fs.existsSync(filePath)) {
+      try {
+        fs.unlinkSync(filePath);
+        console.log(`[SYSTEM MANAGER] Physical file unlinked for user ${userId}: ${filePath}`);
+        return res.json({ success: true, message: 'Media assets permanently deleted from server disk' });
+      } catch (err) {
+        console.error(`Unlink failed for path ${filePath}`, err);
+        return res.status(500).json({ error: 'Unlink operation crashed' });
+      }
+    } else {
+      return res.status(404).json({ error: 'Media asset not registered on local filesystems' });
+    }
+  });
+
+  // REST API: Video File Upload to local folder
+  app.post('/api/upload', upload.single('video'), (req, res) => {
+    if (!req.file) {
+      return res.status(400).json({ error: 'No video file provided' });
+    }
+    const filename = req.file.filename;
+    const videoUrl = `/uploads/${filename}`;
+    const sizeInMB = `${(req.file.size / (1024 * 1024)).toFixed(1)} MB`;
+
+    // Also register this uploaded file in our local in-memory db as fallback
+    const newVideo: Video = {
+      id: generateId('vid'),
+      title: req.file.originalname.replace(/\.[^/.]+$/, ""),
+      videoUrl: videoUrl,
+      thumbnailUrl: 'https://images.unsplash.com/photo-1542751371-adc38448a05e?q=80&w=200',
+      size: sizeInMB,
+      duration: '05:10', // auto calculated on client side, but we can have default
+      createdAt: new Date().toISOString(),
+      status: 'ready'
+    };
+    videos.push(newVideo);
+
+    res.status(200).json({
+      success: true,
+      videoUrl,
+      size: sizeInMB,
+      filename,
+      video: newVideo
+    });
+  });
+
   // REST API: Stream Scheduling
   app.get('/api/streams/schedule', (req, res) => {
     res.json(schedules);
@@ -276,31 +387,193 @@ async function startServer() {
   });
 
   app.post('/api/streams/start-video', (req, res) => {
-    const { videoId } = req.body;
-    const video = videos.find(v => v.id === videoId);
-    if (!video) {
-      return res.status(404).json({ error: 'Video not found' });
+    const { videoId, videoUrl, title, destinations: clientDestinations, userId } = req.body;
+    
+    // Find the video (either in memory, or fallback using request values)
+    let video = videos.find(v => v.id === videoId);
+    const resolvedUrl = videoUrl || (video ? video.videoUrl : null);
+    const resolvedTitle = title || (video ? video.title : 'VOD Stream');
+
+    if (!resolvedUrl) {
+      return res.status(400).json({ error: 'Missing videoUrl or video object' });
     }
 
-    // Mark as streaming
-    video.status = 'streaming';
-    // Enable active destinations to simulate streaming state
-    destinations.forEach(d => {
-      if (d.enabled) d.status = 'streaming';
+    // Update in-memory video status to streaming if it exists
+    if (video) {
+      video.status = 'streaming';
+    }
+
+    // Resolve target platforms to push RTMP stream to
+    // Use destinations passed from client (Firestore values) as priority, or fallback to in-memory destinations
+    const activeDests = (clientDestinations && Array.isArray(clientDestinations))
+      ? clientDestinations.filter((d: any) => d.enabled)
+      : destinations.filter(d => d.enabled);
+
+    if (activeDests.length === 0) {
+      return res.status(400).json({ error: 'No enabled broadcast destinations found. Register and turn on at least one output platform (YouTube or Facebook) first!' });
+    }
+
+    // Find physical file input or use URL/Streaming source
+    let sourcePath = '';
+    if (resolvedUrl.startsWith('/uploads/')) {
+      const filename = resolvedUrl.replace('/uploads/', '');
+      sourcePath = path.join(process.cwd(), 'uploads', filename);
+
+      // Verify file exists
+      if (!fs.existsSync(sourcePath)) {
+        return res.status(404).json({ error: `Uploaded video file was not found on server directory: ${sourcePath}` });
+      }
+    } else {
+      sourcePath = resolvedUrl; // Live web/GCS bucket stream path
+    }
+
+    // Multi-user dynamic stream mapping keys
+    const streamMapKey = userId ? `${userId}-${videoId}` : videoId;
+
+    // Clean any prior streams running for this specific key
+    const existing = activeStreams.get(streamMapKey);
+    if (existing) {
+      existing.processes.forEach((proc) => {
+        try { proc.kill('SIGKILL'); } catch (e) {}
+      });
+      activeStreams.delete(streamMapKey);
+    }
+
+    const mapOfProcesses = new Map<string, ChildProcess>();
+
+    // Spawn an FFmpeg process for each enabled destination
+    activeDests.forEach((dest: any) => {
+      const rtmpTarget = dest.rtmpUrl;
+      const key = dest.streamKey;
+      const finalRtmpUrl = rtmpTarget.endsWith('/') ? `${rtmpTarget}${key}` : `${rtmpTarget}/${key}`;
+
+      console.log(`[STREAM DAEMON] Spawning FFmpeg relay for user ${userId || 'guest'} to ${dest.name} (${dest.platform}) for VOD '${resolvedTitle}'`);
+
+      // Build safe low-overhead streaming parameters
+      const ffmpegArgs = [
+        '-re',                    // Read input video page in real-time speed (important)
+        '-stream_loop', '-1',     // Loop the source video infinitely so live stream remains active
+        '-i', sourcePath,         // Input path
+        '-c:v', 'libx264',        // High quality standard H.264 video codec
+        '-preset', 'ultrafast',   // Ultrafast preset for minimal CPU usage in free tier (Render/VPS)
+        '-tune', 'zerolatency',   // Real-time zero latency streaming
+        '-b:v', '2500k',          // Standard HD bit rate
+        '-maxrate', '2500k',
+        '-bufsize', '5000k',
+        '-pix_fmt', 'yuv420p',    // standard color space (Youtube/Facebook mandatory requirement)
+        '-g', '60',               // keyframe interval (usually 2 seconds for a 30fps output)
+        '-c:a', 'aac',            // AAC Audio format
+        '-b:a', '128k',           // standard stereo bit rate
+        '-ar', '44100',           // 44.1 kHz frequency
+        '-f', 'flv',              // RTMP container
+        finalRtmpUrl              // Target RTMP server key endpoint
+      ];
+
+      try {
+        const child = spawn('ffmpeg', ffmpegArgs);
+        
+        child.stdout.on('data', (chunk) => {
+          console.log(`[FFMPEG ${dest.platform} STDOUT]: ${chunk.toString().trim()}`);
+        });
+
+        child.stderr.on('data', (chunk) => {
+          const text = chunk.toString();
+          if (!text.includes('fps=') && !text.includes('speed=')) {
+            console.log(`[FFMPEG ${dest.platform} INFO]: ${text.trim()}`);
+          }
+        });
+
+        child.on('error', (err) => {
+          console.error(`[FFMPEG ${dest.platform} ERROR]: Failed to spawn or ran into issues:`, err);
+        });
+
+        child.on('close', (code) => {
+          console.log(`[FFMPEG ${dest.platform} CLOSE]: Relayer exited with code ${code}`);
+          dest.status = 'offline';
+        });
+
+        // Set status of destination on server side to active/streaming
+        dest.status = 'streaming';
+        mapOfProcesses.set(dest.id, child);
+      } catch (err) {
+        console.error(`Error initiating FFmpeg relay to ${dest.name}:`, err);
+      }
     });
 
-    res.json({ 
-      success: true, 
-      message: `Dynamic FFmpeg command spawned to stream VOD asset '${video.title}' to active relays.`,
-      command: `ffmpeg -re -i ${video.videoUrl} -c:v libx264 -preset veryfast -maxrate 3000k -bufsize 6000k -pix_fmt yuv420p -g 50 -c:a aac -b:a 128k -f flv rtmp://127.0.0.1/live/VOD_STREAM`
+    activeStreams.set(streamMapKey, {
+      processes: mapOfProcesses,
+      videoId,
+      startedAt: new Date().toISOString(),
+      title: resolvedTitle
+    });
+
+    res.json({
+      success: true,
+      message: `FFmpeg relays successfully deployed! Streaming VOD '${resolvedTitle}' to ${mapOfProcesses.size} destinations.`,
+      videoId,
+      activeDestinationsCount: mapOfProcesses.size,
+      command: `ffmpeg -re -stream_loop -1 -i ${resolvedUrl} -c:v libx264 -preset ultrafast -tune zerolatency -f flv <targets>`
     });
   });
 
   app.post('/api/streams/stop', (req, res) => {
-    // Stop all streaming
-    videos.forEach(v => { v.status = 'ready'; });
+    const { videoId, userId } = req.body;
+    let killedCount = 0;
+
+    console.log(`[STREAM DAEMON] Pause/Stop signal received for user: ${userId || 'guest'}, video: ${videoId || 'ALL'}`);
+
+    if (videoId) {
+      const streamMapKey = userId ? `${userId}-${videoId}` : videoId;
+      const live = activeStreams.get(streamMapKey);
+      if (live) {
+        live.processes.forEach((proc, destId) => {
+          try {
+            proc.kill('SIGKILL');
+            killedCount++;
+            console.log(`[STREAM DAEMON] Terminated FFmpeg connection for dest: ${destId}`);
+          } catch (e) {
+            console.error(e);
+          }
+        });
+        activeStreams.delete(streamMapKey);
+      }
+
+      const video = videos.find(v => v.id === videoId);
+      if (video) video.status = 'ready';
+    } else {
+      // Clean up everything running belonging strictly to the request user session
+      const prefix = userId ? `${userId}-` : null;
+
+      activeStreams.forEach((live, streamKey) => {
+        if (!prefix || streamKey.startsWith(prefix)) {
+          live.processes.forEach((proc, destId) => {
+            try {
+              proc.kill('SIGKILL');
+              killedCount++;
+            } catch (e) {
+              console.error(e);
+            }
+          });
+          const v = videos.find(v => v.id === live.videoId);
+          if (v) v.status = 'ready';
+          activeStreams.delete(streamKey);
+        }
+      });
+
+      if (!userId) {
+        activeStreams.clear();
+        videos.forEach(v => { v.status = 'ready'; });
+      }
+    }
+
+    // Reset of destinations stream statuses
     destinations.forEach(d => { d.status = 'offline'; });
-    res.json({ success: true, message: 'FFmpeg loops interrupted. Direct video broadcasting halted.' });
+
+    res.json({
+      success: true,
+      message: `Stopped operations. Closed ${killedCount} active FFmpeg encoding relays.`,
+      killedCount
+    });
   });
 
   // REST API: User Accounts listing

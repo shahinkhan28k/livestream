@@ -75,6 +75,19 @@ export function handleFirestoreError(error: unknown, operationType: OperationTyp
     path
   };
   console.error('Firestore Error: ', JSON.stringify(errInfo));
+  
+  // Safe offline & read-operation preservation
+  const isOfflineLike = errInfo.error.includes('offline') || 
+                       errInfo.error.includes('Could not reach Cloud Firestore') || 
+                       errInfo.error.includes('unavailable') || 
+                       errInfo.error.includes('Connection failed') ||
+                       errInfo.error.includes('Failed to get document');
+
+  if (operationType === OperationType.GET || isOfflineLike) {
+    console.warn(`[FIREBASE RESILIENCE] Supressed throw for offline/GET action to maintain layout rendering: ${errInfo.error}`);
+    return;
+  }
+
   throw new Error(JSON.stringify(errInfo));
 }
 

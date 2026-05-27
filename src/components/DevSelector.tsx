@@ -83,6 +83,9 @@ export function DevSelector({
   // Sub tab for Deployment
   const [deploySubTab, setDeploySubTab] = useState<'vps' | 'hosting'>('vps');
 
+  // Active backend connection URL for decoupled Render + Vercel deployment
+  const [backendUrlInput, setBackendUrlInput] = useState(() => localStorage.getItem('STREAM_SYNC_BACKEND_URL') || '');
+
   // Multi-user state for Administration
   const [adminUsers, setAdminUsers] = useState<SimulatedUser[]>(() => {
     const saved = localStorage.getItem('admin_users_db');
@@ -1108,7 +1111,8 @@ sudo ufw enable`}</code>
           )}
 
           {deploySubTab === 'hosting' && (
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-6 animate-fade-in">
+            <>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6 animate-fade-in">
               <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 flex flex-col gap-4">
                 <span className="text-amber-500 font-bold text-xs font-mono">🚀 FREE FRONTEND HOSTING: VERCEL</span>
                 <p className="text-xs text-slate-300 leading-relaxed">
@@ -1140,7 +1144,62 @@ sudo ufw enable`}</code>
                 </div>
               </div>
             </div>
-          )}
+
+            {/* VERCEL ⇿ RENDER LIVE INTERACTIVE CONNECTION CONTROLLER */}
+            <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 flex flex-col gap-4">
+              <div className="flex items-center gap-2 leading-none">
+                <div className="w-8 h-8 rounded-lg bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center text-emerald-400">
+                  <DatabaseZap className="w-4 h-4" />
+                </div>
+                <div>
+                  <h4 className="text-xs font-bold text-white uppercase tracking-wider">Vercel ⇿ Render লাইভ লিঙ্ক কনফিগারেশন</h4>
+                  <p className="text-[10px] text-slate-400 mt-1">Vercel-এ হোস্টেড এই ফ্রন্টএন্ড আর Render-এ হোস্টেড ব্যাকএন্ড সার্ভারকে একে অপরের সাথে সংযুক্ত করুন</p>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4 items-center bg-slate-950 p-4 rounded-xl border border-slate-850">
+                <div className="md:col-span-2 flex flex-col gap-1.5 leading-tight">
+                  <label className="text-[10px] uppercase font-mono text-slate-400 font-bold">Render ব্যাকএন্ড সার্ভার ইউআরএল (Backend API URL):</label>
+                  <input
+                    type="text"
+                    value={backendUrlInput}
+                    onChange={(e) => setBackendUrlInput(e.target.value)}
+                    placeholder="যেমনঃ https://streamsync-backend.onrender.com"
+                    className="bg-slate-900 border border-slate-800 rounded-xl px-4 py-2 text-xs font-semibold text-white placeholder-slate-600 focus:outline-none focus:border-emerald-500/40 w-full"
+                  />
+                  <p className="text-[9px] text-slate-500 mt-0.5">ফাঁকা রাখলে এটি লোকাল উইন্ডোজ/লিনাক্স হোস্টে থাকা এক্সপ্রেস সার্ভার ব্যবহার করবে।</p>
+                </div>
+
+                <div className="flex flex-col gap-2">
+                  <button
+                    onClick={() => {
+                      localStorage.setItem('STREAM_SYNC_BACKEND_URL', backendUrlInput);
+                      onAddLog('CLIENT', 'success', `সাফল্যঃ ব্যাকএন্ড API সংযোগ সোর্স আপডেট করা হয়েছে: '${backendUrlInput || 'Internal Localhost Server'}'`);
+                      triggerToast("ব্যাকএন্ড সার্ভার সংযোগ লিঙ্ক সংরক্ষিত হয়েছে!");
+                    }}
+                    className="w-full bg-emerald-500 hover:bg-emerald-600 text-slate-950 text-xs font-bold py-2.5 px-4 rounded-xl shadow-md transition select-none active:scale-95 text-center flex items-center justify-center gap-2 cursor-pointer"
+                  >
+                    <CheckCircle2 className="w-4 h-4" />
+                    সংযোগ সেভ করুন (Save Link)
+                  </button>
+                  {backendUrlInput && (
+                    <button
+                      onClick={() => {
+                        setBackendUrlInput('');
+                        localStorage.removeItem('STREAM_SYNC_BACKEND_URL');
+                        onAddLog('CLIENT', 'warn', `সতর্কতাঃ- ব্যাকএন্ড সংযোগ মুছে ফেলা হয়েছে। লোকালহোস্ট fallback সক্রিয়।`);
+                        triggerToast("লোকালহোস্ট সংযোগে ফিরে যাওয়া হয়েছে");
+                      }}
+                      className="w-full bg-slate-900 hover:bg-slate-850 border border-slate-800 text-slate-400 text-[10px] py-1 px-4 rounded-lg transition cursor-pointer"
+                    >
+                      রিসেট করুন (Use Localhost)
+                    </button>
+                  )}
+                </div>
+              </div>
+            </div>
+          </>
+        )}
         </div>
       )}
 
