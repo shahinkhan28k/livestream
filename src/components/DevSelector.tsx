@@ -86,6 +86,10 @@ export function DevSelector({
   // Active backend connection URL for decoupled Render + Vercel deployment
   const [backendUrlInput, setBackendUrlInput] = useState(() => localStorage.getItem('STREAM_SYNC_BACKEND_URL') || '');
 
+  // Decoupled connection test status
+  const [testConnLoading, setTestConnLoading] = useState(false);
+  const [testConnResult, setTestConnResult] = useState<{ success: boolean; message: string } | null>(null);
+
   // Multi-user state for Administration
   const [adminUsers, setAdminUsers] = useState<SimulatedUser[]>(() => {
     const saved = localStorage.getItem('admin_users_db');
@@ -783,7 +787,7 @@ echo "Backup script generation successful. Configuration successfully packed!"
                                 <option value="Banned">🚫 Banned</option>
                               </select>
                             </td>
-                            <td className="py-3 px-3 font-mono text-[10px] text-slate-350 max-w-[150px] truncate">
+                            <td className="py-3 px-3 font-mono text-[10px] text-slate-355 max-w-[150px] truncate">
                               <code>{u.streamKey}</code>
                             </td>
                             <td className="py-3 px-3 text-slate-400 text-[10px]">
@@ -794,7 +798,7 @@ echo "Backup script generation successful. Configuration successfully packed!"
                                 <button
                                   type="button"
                                   onClick={() => handleResetStreamKey(u.id)}
-                                  className="py-1 px-2.5 bg-slate-950 hover:bg-slate-850 border border-slate-800 hover:border-slate-700 text-slate-300 font-bold rounded text-[10px] transition"
+                                  className="py-1 px-2.5 bg-slate-950 hover:bg-slate-850 border border-slate-800 hover:border-slate-700 text-slate-300 font-bold rounded text-[10px] transition cursor-pointer"
                                   title="Reset Steam Key"
                                 >
                                   🔄 স্ট্রিম কী রিসেট
@@ -807,7 +811,7 @@ echo "Backup script generation successful. Configuration successfully packed!"
                                     u.role === 'Banned' 
                                       ? 'bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-400 border border-emerald-500/10'
                                       : 'bg-rose-500/10 hover:bg-rose-500/20 text-rose-500 border border-rose-500/10'
-                                  }`}
+                                  } cursor-pointer`}
                                 >
                                   {u.role === 'Banned' ? '🔓 আনব্যান' : '🚫 ব্যান করুন'}
                                 </button>
@@ -821,7 +825,6 @@ echo "Backup script generation successful. Configuration successfully packed!"
                 </div>
               </div>
             )}
-
 
             {/* Sub-tab 1c: Live Route Ingest & Overrides Control */}
             {adminSubTab === 'streams' && (
@@ -883,9 +886,9 @@ echo "Backup script generation successful. Configuration successfully packed!"
                               <button
                                 type="button"
                                 disabled
-                                className="flex-1 py-1.5 bg-slate-900 border border-slate-800 text-[10px] text-slate-600 rounded-lg font-bold"
+                                className="flex-1 py-1.5 bg-slate-900 text-slate-500 text-[10px] rounded-lg border border-slate-850 cursor-not-allowed"
                               >
-                                সংযোগ ডিসকানেক্টেড (Offline)
+                                স্থগিত (Offline)
                               </button>
                             )}
                           </div>
@@ -897,52 +900,51 @@ echo "Backup script generation successful. Configuration successfully packed!"
               </div>
             )}
 
-
-            {/* Sub-tab 1d: Delete VOD Assets Manager */}
+            {/* Sub-tab 1d: Video Manager (Delete VOD Assets) */}
             {adminSubTab === 'vods' && (
-              <div className="flex flex-col gap-4.5 animate-fade-in animate-duration-150">
-                <div className="bg-slate-900 border border-slate-800 p-5 rounded-2xl flex flex-col gap-4">
-                  <div>
-                    <h4 className="text-sm font-bold text-white flex items-center gap-1.5">
-                      <Video className="w-4 h-4 text-amber-500" />
-                      লাইভ ভিডিও ব্যাংক ও ফাইল ম্যানেজার (Delete Saved VOD Assets)
-                    </h4>
-                    <p className="text-xs text-slate-450 mt-1">সার্ভার স্টোরেজে সংরক্ষিত সকল মিডিয়া ফাইল অডিট করুন ও বাড়তি বা স্টোরেজ খালি করার জন্য ভিডিও পার্মানেন্ট ডিলিট করে দিন।</p>
-                  </div>
+              <div className="bg-slate-900 border border-slate-800 p-5 rounded-2xl flex flex-col gap-4 animate-fade-in animate-duration-150">
+                <div>
+                  <h4 className="text-sm font-bold text-white flex items-center gap-1.5">
+                    <Video className="w-4 h-4 text-amber-500" />
+                    <span>ভিডিও ম্যানেজার (VOD File Manager)</span>
+                  </h4>
+                  <p className="text-xs text-slate-400 mt-1">সার্ভারে আপলোড করা ক্লাউড ভিডিও ফাইলগুলো মুছে ফেলুন চিরতরে।</p>
+                </div>
 
-                  {videos.length === 0 ? (
-                    <div className="bg-slate-950 p-6 rounded-xl border border-dashed border-slate-850 text-center text-xs text-slate-505">
-                      খালি রিপোজিটরি! কোনো সেভ করা ভিডিও পাওয়া যায়নি।
-                    </div>
-                  ) : (
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4.5">
-                      {videos.map(v => (
-                        <div key={v.id} className="bg-slate-955 p-3 rounded-xl border border-slate-850 flex gap-3 items-center">
-                          <img 
-                            src={v.thumbnailUrl || 'https://images.unsplash.com/photo-1618055182384-a83a8bd57fbe?q=80&w=260'} 
-                            alt="Preview thumb" 
-                            className="w-16 h-12 object-cover rounded-lg border border-slate-800 shrink-0"
+                {videos.length === 0 ? (
+                  <div className="bg-slate-950 p-6 rounded-xl border border-dashed border-slate-850 text-center text-xs text-slate-500">
+                    কোনো আপলোডক্রিয়ার ভিডিও পাওয়া যায়নি।
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    {videos.map(v => (
+                      <div key={v.id} className="bg-slate-950 p-3.5 rounded-xl border border-slate-850 flex items-center justify-between gap-3">
+                        <div className="flex items-center gap-3">
+                          <img
+                            src={v.thumbnailUrl || "/placeholder.jpg"}
+                            className="w-12 h-12 object-cover rounded-lg shrink-0"
+                            alt={v.title}
                             referrerPolicy="no-referrer"
                           />
                           <div className="flex-grow min-w-0 flex flex-col leading-tight">
                             <h5 className="text-[12px] font-bold text-white truncate">{v.title}</h5>
-                            <span className="text-[9px] font-mono text-slate-500 mt-1 block">আকার: {v.size} | স্থায়িত্ব: {v.duration}</span>
-                            <span className="text-[8.5px] text-emerald-400 mt-1 font-semibold">{v.status.toUpperCase()} METADATA ON CLOUD</span>
+                            <span className="text-[9px] font-mono text-slate-550 mt-1 block">আকার: {v.size} | স্থায়িত্ব: {v.duration}</span>
+                            <span className="text-[8.5px] text-emerald-400 mt-1 font-semibold">{v.status?.toUpperCase() || 'OFFLINE'} METADATA ON CLOUD</span>
                           </div>
-
-                          <button
-                            type="button"
-                            onClick={() => handleDeleteVideoAsset(v.id, v.title)}
-                            className="p-2 bg-rose-500/10 hover:bg-rose-500/20 text-rose-500 rounded-lg border border-rose-500/15 transition active:scale-95 shrink-0"
-                            title="মুছে ফেলুন (Permanent Delete)"
-                          >
-                            <Trash2 className="w-4 h-4" />
-                          </button>
                         </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
+
+                        <button
+                          type="button"
+                          onClick={() => handleDeleteVideoAsset(v.id, v.title)}
+                          className="p-2 bg-rose-500/10 hover:bg-rose-500/20 text-rose-500 rounded-lg border border-rose-500/15 transition active:scale-95 shrink-0"
+                          title="মুছে ফেলুন (Permanent Delete)"
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
             )}
 
@@ -953,155 +955,74 @@ echo "Backup script generation successful. Configuration successfully packed!"
 
       {/* TAB 2: PRO PRODUCTION DEPLOYMENT GUIDES (STEP 12) */}
       {mainTab === 'deployment' && (
-        <div className="flex flex-col gap-5 animate-fade-in animate-duration-150">
+        <div className="flex flex-col gap-6 animate-fade-in animate-duration-150">
+          
           <div className="flex bg-slate-900 border border-slate-800 rounded-xl p-1 shadow-sm max-w-md">
-            <button
+            <button 
               onClick={() => setDeploySubTab('vps')}
-              className={`flex-1 py-1.5 text-center text-[11px] font-mono font-bold tracking-wider rounded-lg transition ${
-                deploySubTab === 'vps' ? 'bg-amber-500 text-slate-950 shadow-md font-extrabold' : 'text-slate-400 hover:text-slate-200'
+              className={`flex-1 py-1.5 text-center text-[10px] font-mono font-bold tracking-wider rounded-lg transition ${
+                deploySubTab === 'vps' ? 'bg-amber-500 text-slate-950 shadow-md' : 'text-slate-400 hover:text-slate-200'
               }`}
             >
-              💻 Ubuntu Server (VPS) + PM2 + Nginx
+              🛠️ UBUNTU VPS SETUP
             </button>
-            <button
+            <button 
               onClick={() => setDeploySubTab('hosting')}
-              className={`flex-1 py-1.5 text-center text-[11px] font-mono font-bold tracking-wider rounded-lg transition ${
-                deploySubTab === 'hosting' ? 'bg-amber-500 text-slate-950 shadow-md font-extrabold' : 'text-slate-400 hover:text-slate-200'
+              className={`flex-1 py-1.5 text-center text-[10px] font-mono font-bold tracking-wider rounded-lg transition ${
+                deploySubTab === 'hosting' ? 'bg-amber-500 text-slate-950 shadow-md' : 'text-slate-400 hover:text-slate-200'
               }`}
             >
-              🚀 Vercel / Firebase Hosting Setup
+              ☁️ FREE CLOUD HOSTING
             </button>
           </div>
 
           {deploySubTab === 'vps' && (
-            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-              
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 animate-fade-in animate-duration-150">
               <div className="lg:col-span-2 flex flex-col gap-4">
                 <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 flex flex-col gap-4">
-                  <div className="flex items-center gap-1.5 text-amber-500 font-bold text-sm">
+                  <div className="flex items-center gap-1.5 text-amber-500 font-bold text-sm font-sans">
                     <Server className="w-4 h-4" />
                     <span>Ubuntu VPS ইনস্টলেশন ও প্রডাকশন সেটআপ স্টেপস</span>
                   </div>
 
-                  <p className="text-xs text-slate-350 leading-relaxed">
+                  <p className="text-xs text-slate-350 leading-relaxed font-sans">
                     আপনার তৈরি লাইভ স্ট্রিমিং ওয়েবসাইট ও FFmpeg ট্রান্সকোড রানার ওবিএস ছাড়াই অনবরত ২৪ ঘন্টা সচল রাখতে একটি উবুন্টু ভার্চুয়াল সার্ভার (Ubuntu VPS) ব্যবহার করুন। নিচের কমান্ডগুলো আপনার টার্মিনাল বা পুটি (Putty) তে রান করুন:
                   </p>
 
-                  <div className="bg-slate-950 border border-slate-850 rounded-xl p-4 flex flex-col gap-3 font-mono text-[10px] text-slate-300">
+                  <div className="bg-slate-950 p-4 rounded-xl border border-slate-850 flex flex-col gap-3 font-mono text-[10px] text-slate-300">
                     <div>
                       <span className="text-slate-500 text-[9px] uppercase font-bold block mb-1">ধাপ ১: সিস্টেম প্যাকেজসমূহ ও FFmpeg ইনস্টল করুন:</span>
-                      <code className="text-yellow-405 block select-all bg-slate-900/40 p-1.5 rounded border border-slate-900">
+                      <code className="text-amber-400 block select-all bg-slate-900/40 p-1.5 rounded border border-slate-900">
                         {`sudo apt update && sudo apt install -y curl ffmpeg build-essential certbot python3-certbot-nginx`}
                       </code>
                     </div>
 
                     <div>
                       <span className="text-slate-500 text-[9px] uppercase font-bold block mb-1">ধাপ ২: Node.js (Version 20+) ইনস্টল করুন:</span>
-                      <code className="text-yellow-405 block select-all bg-slate-900/40 p-1.5 rounded border border-slate-900">
+                      <code className="text-amber-400 block select-all bg-slate-900/40 p-1.5 rounded border border-slate-900">
                         {`curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash - && sudo apt install -y nodejs`}
                       </code>
                     </div>
 
                     <div>
-                      <span className="text-slate-500 text-[9px] uppercase font-bold block mb-1">ধাপ ৩: PM2 গ্লোবাললি ইনস্টল করুন (সার্ভার ২৪ ঘন্টা রান রাখার জন্য):</span>
-                      <code className="text-yellow-405 block select-all bg-slate-900/40 p-1.5 rounded border border-slate-900">
-                        {`sudo npm install -y -g pm2`}
+                      <span className="text-slate-500 text-[9px] uppercase font-bold block mb-1">ধাপ ৩: PM2 গ্লোবাললি ইনস্টল করুন এবং সিস্টেম চালু করুন:</span>
+                      <code className="text-amber-400 block select-all bg-slate-900/40 p-1.5 rounded border border-slate-900">
+                        {`sudo npm install -g pm2 && pm2 start dist/server.cjs --name "streamsync-gate"`}
                       </code>
                     </div>
-
-                    <div>
-                      <span className="text-slate-500 text-[9px] uppercase font-bold block mb-1">ধাপ ৪: আপনার প্রজেক্ট ক্লোন করে স্টার্ট দিন:</span>
-                      <pre className="text-yellow-405 block select-all bg-slate-900/40 p-1.5 rounded border border-slate-900 leading-normal">
-{`npm install
-npm run build
-pm2 start dist/server.cjs --name "streamsync"
-pm2 save
-pm2 startup`}
-                      </pre>
-                    </div>
                   </div>
-                </div>
-
-                {/* Nginx config copy section */}
-                <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 flex flex-col gap-3">
-                  <div className="flex items-center justify-between">
-                    <span className="text-xs font-bold text-white flex items-center gap-1.5">
-                      <Globe className="text-amber-500 w-4 h-4" />
-                      Nginx Reverse Proxy কনফিগারেশন রুলস
-                    </span>
-                    <button
-                      onClick={() => handleCopy(`server {
-    listen 80;
-    server_name your_domain.com;
-
-    location / {
-        proxy_pass http://localhost:3000;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection 'upgrade';
-        proxy_set_header Host $host;
-        proxy_cache_bypass $http_upgrade;
-    }
-}`)}
-                      className="bg-slate-800 text-white font-bold text-[10px] px-3 py-1 rounded border border-slate-705 hover:bg-slate-700 flex items-center gap-1"
-                    >
-                      Copy Configuration
-                    </button>
-                  </div>
-                  <p className="text-xs text-slate-400">ডোমেন যুক্ত করে ডিরেক্ট পোর্ট ৩০০৩ সিকিউর করতে Nginx এর <code>/etc/nginx/sites-available/default</code> ফাইলে এটি পেস্ট করুন:</p>
-                  
-                  <pre className="bg-slate-950 p-4.5 rounded-xl border border-slate-850 font-mono text-[9px] text-emerald-450 leading-relaxed overflow-x-auto select-all">
-{`server {
-    listen 80;
-    server_name your_domain.com; # আপনার ডোমেইন বসান
-
-    location / {
-        proxy_pass http://localhost:3000; # Express Node Server
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection 'upgrade';
-        proxy_set_header Host $host;
-        proxy_cache_bypass $http_upgrade;
-    }
-}`}
-                  </pre>
                 </div>
               </div>
 
-              {/* Security VPS hardening config */}
               <div className="flex flex-col gap-4">
-                <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4.5 flex flex-col gap-3">
-                  <span className="text-xs tracking-wider uppercase font-mono font-bold text-slate-400 flex items-center gap-1">
-                    <Lock className="text-amber-500 w-4 h-4" />
-                    VPS Firewall (UFW) পোর্ট কনফিগারেশন
-                  </span>
-                  
-                  <p className="text-[11px] text-slate-400 leading-relaxed">
-                    আপনার ভিপিএস সার্ভারের সিকিউরিটি জোরদার করতে অনাবশ্যক পোর্টগুলো ব্লক রেখুন এবং শুধুমাত্র আরটিএমপি ইনজেস্ট ও এইচটিটিপি পোর্ট অনুমোদন দিন:
+                <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 flex flex-col gap-4">
+                  <div className="flex items-center gap-1.5 text-emerald-450 font-bold text-sm">
+                    <Shield className="w-4 h-4 text-emerald-400" />
+                    <span>SSL (HTTPS) সার্টিফিকেট অ্যাক্টিভেশন</span>
+                  </div>
+                  <p className="text-[11.5px] text-slate-400 leading-relaxed">
+                    Certbot ব্যবহার করে সম্পুর্ন ফ্রীতে লেটস এনক্রিপ্ট এসএসএল সার্টিফিকেট ইনস্টল করুন:
                   </p>
-
-                  <div className="bg-slate-950 p-3 rounded-lg border border-slate-850 font-mono text-[9.5px] text-slate-300 leading-normal">
-                    <p className="text-slate-500 uppercase font-bold text-[8.5px] mb-1">কমান্ড লিস্ট:</p>
-                    <code>{`sudo ufw default deny incoming
-sudo ufw default allow outgoing
-sudo ufw allow 22/tcp # SSH Config
-sudo ufw allow 80/tcp # Http Nginx
-sudo ufw allow 443/tcp # Https Certbot
-sudo ufw allow 1935/tcp # RTMP Channel Ingest
-sudo ufw enable`}</code>
-                  </div>
-
-                  <div className="bg-rose-500/5 p-3 rounded-lg border border-rose-500/10 text-[10.5px] text-rose-400 leading-relaxed">
-                    ⚠️ <strong>সতর্কতা:</strong> পিসি থেকে স্ট্রিম কি এর মাধ্যমে আরটিএমপি ডাটা পেতে হলে অবশ্যই ফায়ারওয়ালে পোর্ট <strong>১৯৩৫ (1935)</strong> পোর্ট উন্মুক্ত রাখতে হবে।
-                  </div>
-                </div>
-
-                <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4.5 flex flex-col gap-3">
-                  <span className="text-xs uppercase font-mono text-slate-300 font-bold flex items-center gap-1">
-                    <Shield className="text-emerald-400 w-3.5 h-3.5" />
-                    SSL (HTTPS) সার্টিফিকেট অ্যাক্টিভেশন
-                  </span>
-                  <p className="text-[11.5px] text-slate-400">Certbot ব্যবহার করে ১-কমিটমেন্টে সম্পুর্ন ফ্রি লেটস এনক্রিপ্ট এসএসএল সার্টিফিকেট ইনস্টল করুন:</p>
                   <code className="text-slate-200 bg-slate-950 p-2 rounded-lg border border-slate-850 font-mono text-[9px] block leading-snug">
                     sudo certbot --nginx -d your_domain.com
                   </code>
@@ -1109,6 +1030,8 @@ sudo ufw enable`}</code>
               </div>
             </div>
           )}
+
+
 
           {deploySubTab === 'hosting' && (
             <>
