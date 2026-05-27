@@ -54,6 +54,7 @@ import { HomeView } from './components/HomeView';
 import { LoginView } from './components/LoginView';
 import { AnalyticsView } from './components/AnalyticsView';
 import { DevSelector } from './components/DevSelector';
+import ObsWebSocketControl from './components/ObsWebSocketControl';
 
 // Firebase core configuration & methods
 import { onAuthStateChanged, signOut } from 'firebase/auth';
@@ -449,6 +450,17 @@ echo "Stream completed or stopped by operator."
 
         setCurrentUser(matchedUser);
         localStorage.setItem('currentUser', JSON.stringify(matchedUser));
+
+        // Sync authenticated user credentials with the backend server dynamically
+        fetch(getApiUrl('/api/auth/sync'), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            id: matchedUser.id,
+            email: matchedUser.email,
+            streamKey: matchedUser.streamKey
+          })
+        }).catch(err => console.warn('Could not sync user credentials to Express server:', err));
       } else {
         setCurrentUser(null);
         localStorage.removeItem('currentUser');
@@ -467,7 +479,7 @@ echo "Stream completed or stopped by operator."
         { id: 'dst_2', platform: 'facebook', name: 'Facebook Live Relay', rtmpUrl: 'rtmps://live-api-s.facebook.com:443/rtmp/', streamKey: 'fb-xxxx-yyyy-zzzz', enabled: false, status: 'offline' }
       ]);
       setVideos([
-        { id: 'vid_1', title: 'Cyberpunk esports compilation 2026', videoUrl: 'https://storage.googleapis.com', thumbnailUrl: 'https://images.unsplash.com/photo-1542751371-adc38448a05e?q=80&w=200', size: '142.4 MB', duration: '04:15', createdAt: new Date().toISOString(), status: 'ready' }
+        { id: 'vid_1', title: 'Cyberpunk esports compilation 2026', videoUrl: 'https://storage.googleapis.com/stream-sync-assets/cyperpunk_esports.mp4', thumbnailUrl: 'https://images.unsplash.com/photo-1542751371-adc38448a05e?q=80&w=200', size: '142.4 MB', duration: '04:15', createdAt: new Date().toISOString(), status: 'ready' }
       ]);
       setSchedules([]);
       return;
@@ -1124,8 +1136,20 @@ echo "Stream completed or stopped by operator."
           status: 'streaming'
         });
 
+        // Update active destinations status in Firestore so they turn red/LIVE on dashboard
+        for (const dest of activeDests) {
+          try {
+            await updateDoc(doc(db, 'users', currentUser.id, 'destinations', dest.id), {
+              status: 'streaming'
+            });
+          } catch (destErr) {
+            console.warn(`Could not update destination status in Firestore: ${dest.id}`, destErr);
+          }
+        }
+
         // 2. Optimistic local state update
         setVideos(prev => prev.map(v => v.id === videoId ? { ...v, status: 'streaming' } : v));
+        setDestinations(prev => prev.map(d => d.enabled ? { ...d, status: 'streaming' } : d));
         addLog('FFMPEG', 'success', 'VOD broadcast updated in cloud. Initializing server engine relays...');
 
         // 3. Command Express of start-video
@@ -1205,7 +1229,22 @@ echo "Stream completed or stopped by operator."
             status: 'ready'
           });
         }
+
+        // Reset and update all destination statuses to offline on stream stop
+        for (const dest of destinations) {
+          if (dest.status === 'streaming') {
+            try {
+              await updateDoc(doc(db, 'users', currentUser.id, 'destinations', dest.id), {
+                status: 'offline'
+              });
+            } catch (destErr) {
+              console.warn(`Could not reset destination status in Firestore: ${dest.id}`, destErr);
+            }
+          }
+        }
+
         setVideos(prev => prev.map(v => (videoId ? (v.id === videoId ? { ...v, status: 'ready' } : v) : { ...v, status: 'ready' })));
+        setDestinations(prev => prev.map(d => ({ ...d, status: 'offline' })));
         addLog('FFMPEG', 'warn', 'ভিডিও সম্প্রচার ফায়ারস্টোর ক্লাউডে স্থগিত করা হয়েছে।');
       } catch (err) {
         console.error("error stopping stream", err);
@@ -2975,6 +3014,15 @@ echo "Stream completed or stopped by operator."
 
                 </div>
               )}
+
+              {/* OBS Studio WebSocket Integration Panel */}
+              <ObsWebSocketControl 
+                destinations={destinations}
+                setDestinations={setDestinations}
+                addLog={addLog}
+                currentUser={currentUser}
+                db={db}
+              />
 
               {/* FFmpeg logs terminal output */}
               <div className="bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden h-[220px] flex flex-col shadow">

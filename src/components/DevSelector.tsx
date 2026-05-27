@@ -175,6 +175,112 @@ export function DevSelector({
     setTimeout(() => setToastMessage(null), 3000);
   };
 
+  // RTMP Handshake Authenticator Diagnostic states
+  const [diagStreamKey, setDiagStreamKey] = useState(() => {
+    try {
+      const stored = localStorage.getItem('currentUser');
+      if (stored) {
+        const parsed = JSON.parse(stored);
+        if (parsed && parsed.streamKey) {
+          return parsed.streamKey;
+        }
+      }
+    } catch (e) {}
+    return 'live_738192_x8s9f2p01a';
+  });
+  const [diagApp, setDiagApp] = useState('live');
+  const [diagLoading, setDiagLoading] = useState(false);
+  const [diagResult, setDiagResult] = useState<{
+    status: number;
+    statusText: string;
+    headers: Record<string, string>;
+    body: string;
+    timestamp: string;
+  } | null>(null);
+
+  // Stream Key Validation check helper function
+  const getStreamKeyValidation = (key: string) => {
+    const errors: string[] = [];
+    const lengthOk = key.length >= 8 && key.length <= 64;
+    const charsOk = /^[a-zA-Z0-9_\-]+$/.test(key);
+
+    if (!key) {
+      errors.push("স্ট্রিম কী ফাঁকা রাখা যাবে না (Stream key cannot be empty)");
+    } else {
+      if (!lengthOk) {
+        errors.push("দৈর্ঘ্য অবশ্যই ৮ থেকে ৬৪ অক্ষরের মধ্যে হতে হবে (Length must be 8-64 characters)");
+      }
+      if (!charsOk) {
+        errors.push("শুধুমাত্র বর্ণ, সংখ্যা, হাইফেন (-) এবং আন্ডারস্কোর (_) সমর্থনযোগ্য (Only alphanumeric, hyphens, and underscores are allowed)");
+      }
+    }
+
+    return {
+      isValid: errors.length === 0,
+      lengthOk,
+      charsOk,
+      errors
+    };
+  };
+
+  const runHandshakeDiagnostic = async () => {
+    const validation = getStreamKeyValidation(diagStreamKey);
+    if (!validation.isValid) {
+      triggerToast("ত্রুটি! স্ট্রিম কী সঠিক ফরম্যাটে নেই।");
+      return;
+    }
+
+    setDiagLoading(true);
+    setDiagResult(null);
+    try {
+      const targetUrl = localStorage.getItem('STREAM_SYNC_BACKEND_URL') || '';
+      const baseUrl = targetUrl ? targetUrl.replace(/\/$/, '') : '';
+      const endpoint = `${baseUrl}/api/streams/auth`;
+
+      console.log(`[DIAGNOSTIC] Sending manual handshake test to ${endpoint} with stream key: ${diagStreamKey}`);
+
+      const response = await fetch(endpoint, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': '*/*'
+        },
+        body: JSON.stringify({
+          app: diagApp,
+          name: diagStreamKey
+        })
+      });
+
+      const responseText = await response.text();
+      const headersObj: Record<string, string> = {};
+      response.headers.forEach((value, name) => {
+        headersObj[name] = value;
+      });
+
+      setDiagResult({
+        status: response.status,
+        statusText: response.statusText,
+        headers: headersObj,
+        body: responseText,
+        timestamp: new Date().toLocaleTimeString()
+      });
+
+      triggerToast("ডায়াগনস্টিক হ্যান্ডশেক রিকোয়েস্ট সম্পন্ন হয়েছে!");
+    } catch (err: any) {
+      console.error("[DIAGNOSTIC ERROR]", err);
+      setDiagResult({
+        status: 0,
+        statusText: 'Fetch Failure / Connection Timeout',
+        headers: { 'error-type': 'Network Error' },
+        body: `Could not connect to the Express server at /api/streams/auth. Error: ${err.message || 'Unknown network error'}`,
+        timestamp: new Date().toLocaleTimeString()
+      });
+      triggerToast("ডায়াগনস্টিক রিকোয়েস্টে ত্রুটি ঘটেছে!");
+    } finally {
+      setDiagLoading(false);
+    }
+  };
+
   const handleCopy = (text: string) => {
     navigator.clipboard.writeText(text);
     setCopiedText(true);
@@ -894,6 +1000,223 @@ echo "Backup script generation successful. Configuration successfully packed!"
                           </div>
                         </div>
                       ))}
+                    </div>
+                  )}
+                </div>
+
+                {/* RTMP HANDSHAKE DIAGNOSTIC PANEL */}
+                <div id="rtmp-handshake-diagnostic-tool" className="bg-slate-900 border border-slate-805 p-5 rounded-2xl flex flex-col gap-4">
+                  <div className="flex flex-col md:flex-row md:items-center justify-between gap-2 border-b border-slate-800/80 pb-3">
+                    <div>
+                      <h4 className="text-sm font-bold text-white flex items-center gap-1.5 font-sans">
+                        <Activity className="w-4 h-4 text-emerald-450 animate-pulse" />
+                        <span>RTMP Handshake Authenticator & Diagnostic Panel</span>
+                      </h4>
+                      <p className="text-[11px] text-slate-400 mt-1 whitespace-normal">
+                        ম্যানুয়ালি <code>/api/streams/auth</code> এন্ডপয়েন্টটি টেস্ট করুন। এটি ব্রডকাস্টার হ্যান্ডশেক ফেইলিয়র ট্রাবলশুটের জন্য অত্যন্ত উপযোগী।
+                      </p>
+                    </div>
+                    <span className="text-[8.5px] font-mono tracking-wider px-2 py-0.5 bg-slate-950 border border-slate-800 rounded-md text-emerald-400 font-extrabold uppercase shrink-0 self-start md:self-center">
+                      ON_PUBLISH HOOK
+                    </span>
+                  </div>
+
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-4 bg-slate-955 p-4 rounded-xl border border-slate-850">
+                    {/* Input: Select Stream Key or custom */}
+                    <div className="flex flex-col gap-1.5 min-w-0">
+                      <label className="text-[9.5px] uppercase font-mono font-bold text-slate-400">স্ট্রিম কী নির্বাচন করুন (Select Stream Key)</label>
+                      <select
+                        value={diagStreamKey}
+                        onChange={(e) => setDiagStreamKey(e.target.value)}
+                        className="bg-slate-900 border border-slate-800 text-xs font-mono text-slate-200 p-2 rounded-xl focus:border-emerald-500/40 focus:outline-none focus:ring-0 cursor-pointer"
+                      >
+                        {adminUsers.map(u => (
+                          <option key={u.id} value={u.streamKey}>
+                            {u.name} ({u.role}) - {u.streamKey.substring(0, 12)}...
+                          </option>
+                        ))}
+                        <option value="invalid_or_wrong_key">❌ @ত্রুটিপূর্ণ/ভুল স্ট্রিম কী (Wrong Key Demo)</option>
+                        <option value="">⚙️ ফাকা স্ট্রিম কী (Empty Key Demo)</option>
+                      </select>
+                      <div className="flex flex-col gap-1 mt-1">
+                        <span className="text-[9px] uppercase font-mono text-slate-500">ম্যানুয়ালি এডিট করুন:</span>
+                        <input
+                          id="diagnostic-stream-key-input"
+                          type="text"
+                          value={diagStreamKey}
+                          onChange={(e) => setDiagStreamKey(e.target.value)}
+                          placeholder="অথবা কাস্টম কী লিখুন..."
+                          className="bg-slate-900 border border-slate-800 text-xs font-mono p-1.5 px-3 rounded-lg text-white focus:outline-none focus:border-emerald-450 w-full"
+                        />
+                      </div>
+
+                      {/* Real-time Stream Key Validator */}
+                      {(() => {
+                        const validation = getStreamKeyValidation(diagStreamKey);
+                        return (
+                          <div className="mt-2.5 bg-slate-950 p-3 rounded-xl border border-slate-850 flex flex-col gap-2">
+                            <div className="flex items-center justify-between border-b border-slate-900 pb-1.5">
+                              <span className="text-[9px] uppercase tracking-wider font-bold text-slate-400 font-mono">স্ট্রিম কী ভ্যালিডেটর</span>
+                              <span className={`text-[8.5px] font-mono font-extrabold px-1.5 py-0.5 rounded ${
+                                validation.isValid 
+                                  ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20' 
+                                  : 'bg-rose-500/10 text-rose-450 border border-rose-500/20'
+                              }`}>
+                                {validation.isValid ? '✓ FORMAT OK' : '✗ INVALID FORMAT'}
+                              </span>
+                            </div>
+                            <div className="flex flex-col gap-1.5 text-[10px] font-mono">
+                              <div className="flex items-center gap-2">
+                                <span className={validation.lengthOk ? "text-emerald-400 font-bold" : "text-rose-405 font-bold"}>
+                                  {validation.lengthOk ? "✓" : "✗"}
+                                </span>
+                                <span className={validation.lengthOk ? "text-slate-300" : "text-slate-500"}>
+                                  ৮ - ৬৪ অক্ষরের দৈর্ঘ্য ({diagStreamKey.length}/64)
+                                </span>
+                              </div>
+                              <div className="flex items-center gap-2">
+                                <span className={validation.charsOk ? "text-emerald-400 font-bold" : "text-rose-405 font-bold"}>
+                                  {validation.charsOk ? "✓" : "✗"}
+                                </span>
+                                <span className={validation.charsOk ? "text-slate-300" : "text-slate-500"}>
+                                  অনুমোদিত বর্ণমালা (Alphanumeric/hyphens)
+                                </span>
+                              </div>
+                            </div>
+                            {validation.errors.length > 0 && (
+                              <div className="text-[9px] text-rose-400 leading-snug mt-1 bg-rose-500/5 p-2 rounded-lg border border-rose-500/10">
+                                {validation.errors.map((err, i) => (
+                                  <div key={i} className="flex items-start gap-1">
+                                    <span className="shrink-0 text-rose-400">•</span>
+                                    <span>{err}</span>
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })()}
+                    </div>
+
+                    {/* Input: RTMP App Profile */}
+                    <div className="flex flex-col gap-1.5">
+                      <label className="text-[9.5px] uppercase font-mono font-bold text-slate-400">RTMP অ্যাপ্লিকেশন প্রোফাইল</label>
+                      <select
+                        value={diagApp}
+                        onChange={(e) => setDiagApp(e.target.value)}
+                        className="bg-slate-900 border border-slate-805 text-xs font-mono text-slate-200 p-2 rounded-xl focus:border-emerald-500/40 focus:outline-none focus:ring-0 cursor-pointer"
+                      >
+                        <option value="live">live (অনুমোদিত/সঠিক)</option>
+                        <option value="vod">vod (ভুল অ্যাপ ডেমো)</option>
+                        <option value="testing">testing (ভুল অ্যাপ ডেমো)</option>
+                      </select>
+                      <p className="text-[9.5px] text-slate-500 leading-snug mt-1">
+                        সার্ভার শুধুমাত্র <code>live</code> অ্যাপ্লিকেশনে হ্যান্ডশেক কাস্ট অনুমোদন করবে।
+                      </p>
+                    </div>
+
+                    {/* Action Button & API Info */}
+                    <div className="flex flex-col gap-2 justify-center">
+                      <button
+                        id="run-diagnostic-handshake-btn"
+                        type="button"
+                        onClick={runHandshakeDiagnostic}
+                        disabled={diagLoading || !getStreamKeyValidation(diagStreamKey).isValid}
+                        className="w-full bg-emerald-500 hover:bg-emerald-600 disabled:bg-slate-800 disabled:text-slate-500 disabled:opacity-50 text-slate-950 font-bold text-xs py-3 px-4 rounded-xl shadow-md transition select-none active:scale-95 flex items-center justify-center gap-2 cursor-pointer border-none"
+                      >
+                        {diagLoading ? (
+                          <>
+                            <RefreshCw className="w-4 h-4 animate-spin text-slate-950" />
+                            <span>অনুমোদন যাচাই হচ্ছে...</span>
+                          </>
+                        ) : !getStreamKeyValidation(diagStreamKey).isValid ? (
+                          <>
+                            <AlertTriangle className="w-4 h-4 text-rose-400" />
+                            <span>ভুল স্ট্রিম কী (Check Format)</span>
+                          </>
+                        ) : (
+                          <>
+                            <Activity className="w-4 h-4 text-slate-950" />
+                            <span>হ্যান্ডশেক টেস্ট করুন (Trigger Test)</span>
+                          </>
+                        )}
+                      </button>
+                      <button
+                        type="button"
+                        className="text-[9.5px] font-semibold text-slate-400 hover:text-white transition underline cursor-pointer bg-transparent border-none outline-none"
+                        onClick={() => {
+                          setDiagStreamKey('live_738192_x8s9f2p01a');
+                          setDiagApp('live');
+                          setDiagResult(null);
+                        }}
+                      >
+                        রিসেট করুন (Reset Form)
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* DIAGNOSTIC OUTPUT TERMINAL */}
+                  {diagResult && (
+                    <div id="diagnostic-result-terminal" className="flex flex-col gap-3 animate-fade-in">
+                      {/* Diagnostic Summary Header */}
+                      <div className={`p-4 rounded-xl border flex items-start gap-3 ${
+                        diagResult.status === 200 
+                          ? 'bg-emerald-500/10 border-emerald-500/20 text-emerald-300' 
+                          : diagResult.status === 401 
+                          ? 'bg-rose-500/10 border-rose-500/20 text-rose-300'
+                          : 'bg-amber-500/10 border-amber-500/20 text-amber-300'
+                      }`}>
+                        <div className="mt-0.5 shrink-0 text-lg select-none">
+                          {diagResult.status === 200 ? '✔️' : '❌'}
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <h5 className="text-xs font-bold uppercase tracking-wider font-mono">
+                            হ্যান্ডশেক রেসপন্স কোড: {diagResult.status} ({diagResult.statusText})
+                          </h5>
+                          <p className="text-[11.5px] mt-1 leading-relaxed text-slate-300">
+                            {diagResult.status === 200 && "সফল সংযোগ! আপনি OBS বা FFmpeg চালুর পর সফলভাবে লাইভ স্ট্রিম সোর্স কানেক্ট করতে সক্ষম হবেন।"}
+                            {diagResult.status === 401 && "সংযোগ বিচ্ছিন্ন (Forbidden)! আপনার স্ট্রিম কী-টি সিস্টেমে নিবন্ধিত নেই বা অবৈধ। অনুগ্রহ করে অ্যাডমিন প্যানেলের 'User base' থেকে সক্রিয় করে নিন।"}
+                            {diagResult.status === 400 && "অনুরোধের ত্রুটি (Bad Request)! RTMP অ্যাপ্লিকেশন প্রোফাইল বা প্যারামিটার পাঠানোয় কোনো সমস্যা ঘটেছে।"}
+                            {diagResult.status === 0 && "নেটওয়ার্ক রেসপন্স টাইমআউট! পোর্টাল ব্যাকএন্ড এক্সপ্রেস কন্টেইনারের সাথে যোগাযোগ স্থাপন করতে পারেনি।"}
+                          </p>
+                        </div>
+                        <span className="text-[10px] font-mono text-slate-400 shrink-0 select-none">
+                          {diagResult.timestamp}
+                        </span>
+                      </div>
+
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        {/* Headers Panel */}
+                        <div className="bg-slate-950 p-4 rounded-xl border border-slate-850 flex flex-col gap-2">
+                          <h6 className="text-[10px] font-mono uppercase font-bold text-slate-400 flex items-center justify-between">
+                            <span>RESPONSE HTTP HEADERS (হেডার ডাটা)</span>
+                            <span className="text-[9px] text-slate-500">Total: {Object.keys(diagResult.headers).length}</span>
+                          </h6>
+                          <div className="overflow-x-auto max-h-[160px] text-[10px] font-mono text-slate-350 leading-relaxed divide-y divide-slate-850/60 flex flex-col">
+                            {Object.entries(diagResult.headers).length > 0 ? (
+                              Object.entries(diagResult.headers).map(([key, value]) => (
+                                <div key={key} className="py-1 flex justify-between gap-4">
+                                  <span className="text-emerald-500/90 font-bold">{key}:</span>
+                                  <span className="text-right text-slate-200 select-all truncate max-w-[200px]" title={value}>{value}</span>
+                                </div>
+                              ))
+                            ) : (
+                              <div className="py-2 text-slate-500 italic">No headers found</div>
+                            )}
+                          </div>
+                        </div>
+
+                        {/* Raw Body Response */}
+                        <div className="bg-slate-950 p-4 rounded-xl border border-slate-850 flex flex-col gap-2">
+                          <h6 className="text-[10px] font-mono uppercase font-bold text-slate-400 flex items-center justify-between">
+                            <span>RAW RESPONSE BODY (বডি ডাটা)</span>
+                            <span className="text-[9px] text-zinc-500">TXT/JSON</span>
+                          </h6>
+                          <pre className="text-[10.5px] font-mono p-3 bg-slate-900 rounded-lg border border-slate-800 text-slate-200 overflow-x-auto select-all max-h-[160px] whitespace-pre-wrap leading-relaxed">
+                            {diagResult.body || <span className="text-slate-500 italic">No response body returned</span>}
+                          </pre>
+                        </div>
+                      </div>
                     </div>
                   )}
                 </div>

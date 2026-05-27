@@ -209,6 +209,30 @@ async function startServer() {
     });
   });
 
+  // REST API: Sync Firebase Auth user to server in-memory db dynamically
+  app.post('/api/auth/sync', (req, res) => {
+    const { id, email, streamKey } = req.body;
+    if (!id || !streamKey) {
+      return res.status(400).json({ error: 'Missing user id or streamKey configuration' });
+    }
+
+    const index = users.findIndex(u => u.id === id);
+    const syncedUser = {
+      id,
+      email: email || '',
+      streamKey
+    };
+
+    if (index !== -1) {
+      users[index] = syncedUser;
+    } else {
+      users.push(syncedUser);
+    }
+
+    console.log(`[USER SYNC SUCCESS] Synchronized user account on server: ${email || id} with Stream Key: ${streamKey}`);
+    res.json({ success: true, user: syncedUser });
+  });
+
   // REST API: Stream Destinations CRUD
   app.get('/api/destinations', (req, res) => {
     res.json(destinations);
@@ -465,9 +489,15 @@ async function startServer() {
         '-c:a', 'aac',            // AAC Audio format
         '-b:a', '128k',           // standard stereo bit rate
         '-ar', '44100',           // 44.1 kHz frequency
-        '-f', 'flv',              // RTMP container
-        finalRtmpUrl              // Target RTMP server key endpoint
+        '-f', 'flv'               // RTMP container
       ];
+
+      // Add TLS bypass for secure RTMPS streams e.g. Facebook
+      if (finalRtmpUrl.startsWith('rtmps://')) {
+        ffmpegArgs.push('-tls_verify', '0');
+      }
+
+      ffmpegArgs.push(finalRtmpUrl); // Target RTMP server key endpoint
 
       try {
         const child = spawn('ffmpeg', ffmpegArgs);
@@ -584,13 +614,19 @@ async function startServer() {
   // REST API: Nginx-RTMP rtmp:// Ingestion Hook (on_publish auth check)
   // This webhook is invoked when OBS starts pitching video to RTMP server.
   app.post('/api/streams/auth', (req, res) => {
-    const { app: rtmpApp, name: streamKey, swfurl, tcurl, clientid } = req.body;
+    // Collect parameters from request body, query arguments, or headers to prevent parameter mismatch
+    const rtmpApp = req.body.app || req.query.app || 'live';
+    const streamKey = req.body.name || req.query.name || req.body.streamKey || req.query.streamKey || '';
 
-    // Typically Nginx RTMP sends a POST query string containing the stream key as the "name" parameter
     console.log(`[RTMP AUTH HOOK] Ingest Authenticating: app=${rtmpApp}, streamKey=${streamKey}`);
 
     if (rtmpApp !== 'live') {
       return res.status(400).send('Invalid RTMP application profile');
+    }
+
+    if (!streamKey) {
+      console.log(`[RTMP AUTH FAILURE] Missing streamKey parameter in request.`);
+      return res.status(400).send('Bad Request: streamKey parameters are required');
     }
 
     // Verify stream key exists in database
